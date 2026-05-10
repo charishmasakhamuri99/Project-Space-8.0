@@ -1,3 +1,39 @@
+Start
+  ↓
+Input Raw Image
+  ↓
+Image → Pixel Conversion
+(Python / Jupyter)
+  ↓
+Pixel Matrix
+  ↓
+AI Training
+(Model learns weights)
+  ↓
+Generated Weights
+(Knowledge learned by AI)
+  ↓
+Store Weights in Memory
+  ↓
+Pixels + Weights Sent
+to Systolic Array
+  ↓
+Parallel MAC Operations
+(Pixel × Weight + Sum)
+  ↓
+Feature Map Generated
+  ↓
+Output Pixel Matrix
+  ↓
+Pixel → Image Conversion
+(Python)
+  ↓
+Processed Output Image
+  ↓
+End
+ 
+ 
+ 
  Systolic-Array-Matrix-Multiplication
 Implementation of weight stationary systolic array which has a size of 4x4(scalable) to 256X256.
 
