@@ -1,42 +1,46 @@
-`define SUM   27
-`define PIXEL  8
-
-// Combinational — converts 27-bit signed adder output to 8-bit unsigned pixel
-// mode=0 (Gaussian): arithmetic right-shift by 4, then clamp [0,255]
-// mode=1 (Sobel-X) : absolute value,           then clamp [0,255]
-
-module output_normalizer(
-  input  signed [`SUM-1:0] raw_result,
-  input  mode,
-  input  valid_in,
-  output reg [`PIXEL-1:0] pixel_out,
-  output wire valid_out
+module output_normalizer #(
+  parameter SUM = 27,
+  parameter PIXEL = 8
+)(
+  input  logic signed [SUM-1:0] raw_result,
+  input  logic mode,
+  input  logic valid_in,
+  output logic [PIXEL-1:0] pixel_out,
+  output logic valid_out
 );
 
   assign valid_out = valid_in;
 
-  wire signed [`SUM-1:0] abs_val;
-  assign abs_val = raw_result[`SUM-1] ? (~raw_result + `SUM'd1) : raw_result;
+  logic signed [SUM-1:0] abs_val;
+  logic signed [SUM-1:0] max_pixel;
+  logic signed [SUM-1:0] gauss_shifted;
 
-  wire [`SUM-1:0] gauss_shifted;
-  assign gauss_shifted = {{4{raw_result[`SUM-1]}}, raw_result[`SUM-1:4]};
+  assign abs_val = raw_result[SUM-1] ?
+                   (~raw_result + 1'b1) :
+                    raw_result;
 
-  always@(*) begin
+  assign gauss_shifted =
+          {{4{raw_result[SUM-1]}}, raw_result[SUM-1:4]};
+
+  assign max_pixel =
+          {{(SUM-8){1'b0}}, 8'd255};
+
+  always_comb begin
     if(!mode) begin
-      // Gaussian — shift then clamp
-      if(gauss_shifted[`SUM-1])
-        pixel_out = 8'd0;
-      else if(gauss_shifted > `SUM'd255)
-        pixel_out = 8'd255;
+      // Gaussian mode
+      if(gauss_shifted[SUM-1])
+        pixel_out = {PIXEL{1'b0}};
+      else if(gauss_shifted > max_pixel)
+        pixel_out = {PIXEL{1'b1}};
       else
-        pixel_out = gauss_shifted[`PIXEL-1:0];
+        pixel_out = gauss_shifted[PIXEL-1:0];
     end
     else begin
-      // Sobel — abs then clamp
-      if(abs_val > `SUM'd255)
-        pixel_out = 8'd255;
+      // Sobel mode
+      if(abs_val > max_pixel)
+        pixel_out = {PIXEL{1'b1}};
       else
-        pixel_out = abs_val[`PIXEL-1:0];
+        pixel_out = abs_val[PIXEL-1:0];
     end
   end
 
