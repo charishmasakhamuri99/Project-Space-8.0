@@ -58,7 +58,7 @@ module tb_top;
     end
   endtask
 
-  task feed_image(input [255*8:0] filename);
+  task feed_image(input [255*8:0] pixel.txt);
     integer fd;
     integer pixel_val;
     integer col, row;
