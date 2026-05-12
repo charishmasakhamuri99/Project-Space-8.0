@@ -63,9 +63,9 @@ module tb_top;
     integer pixel_val;
     integer col, row;
     begin
-      fd = $fopen(filename, "rb");
+      fd = $fopen(pixel.txt, "rb");
       if (fd == 0) begin
-        $display("ERROR: Cannot open pixel file: %s", filename);
+        $display("ERROR: Cannot open pixel file: %s", pixel.txt);
         $finish;
       end
       for (row = 0; row < IMAGE_HEIGHT; row = row + 1) begin
