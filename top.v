@@ -1,201 +1,205 @@
 `timescale 1ns/1ps
 
-module top #(
-  parameter IMAGE_WIDTH   = 258,
-  parameter IMAGE_HEIGHT  = 258,
-  parameter OUTPUT_SIZE   = 256,
-  parameter PIXEL_W       = 8,
-  parameter WEIGHT_W      = 8,
-  parameter PRODUCT_W     = 24,
-  parameter SUM_W         = 27,
-  parameter ADDER_LATENCY = 4,
-  parameter SA_ROWS       = 3,
-  parameter SA_COLS       = 3
-)(
-  input  wire        clk,
-  input  wire        rst,
-  input  wire        start,
-  input  wire        mode,
-  input  wire [7:0]  pixel_in,
-  input  wire        pixel_valid,
-  output wire        pixel_ready,
-  output wire [7:0]  pixel_out,
-  output wire        pixel_out_valid,
-  output wire        done
-);
+module tb_top;
 
-  wire [$clog2(IMAGE_WIDTH)-1:0]  pic_wr_addr;
-  wire [PIXEL_W-1:0]              pic_wr_data;
-  wire                            pic_wr_en_lb0, pic_wr_en_lb1;
-  wire [PIXEL_W-1:0]              pic_live_pixel;
-  wire                            pic_live_valid;
-  wire                            pic_row_done, pic_frame_done;
-  wire [$clog2(IMAGE_HEIGHT)-1:0] pic_row_cnt;
+  parameter IMAGE_WIDTH   = 258;
+  parameter IMAGE_HEIGHT  = 258;
+  parameter OUTPUT_SIZE   = 256;
+  parameter PIXEL_W       = 8;
+  parameter CLK_PERIOD    = 10;
+  parameter TOTAL_PIXELS  = IMAGE_WIDTH * IMAGE_HEIGHT;
+  parameter TOTAL_OUTPUT  = OUTPUT_SIZE * OUTPUT_SIZE;
 
-  wire [PIXEL_W-1:0] lb0_rd_data, lb1_rd_data;
+  reg        clk, rst, start, mode;
+  reg  [7:0] pixel_in;
+  reg        pixel_valid;
+  wire       pixel_ready;
+  wire [7:0] pixel_out;
+  wire       pixel_out_valid;
+  wire       done;
 
-  wire                            cu_load_weight;
-  wire                            cu_shift_en;
-  wire                            cu_sw_flush;
-  wire                            cu_pe_pixel_valid;
-  wire                            cu_out_wr_en;
-  wire                            cu_out_rd_en;
-  wire [$clog2(IMAGE_WIDTH)-1:0]  cu_lb_rd_addr;
-  wire [2:0]                      cu_state;
+  integer i, j;
+  integer pix_fd, out_fd, ref_fd;
+  integer cmp_errors;
+  integer out_pixel_count;
 
-  wire [PIXEL_W-1:0] sw_w00, sw_w01, sw_w02;
-  wire [PIXEL_W-1:0] sw_w10, sw_w11, sw_w12;
-  wire [PIXEL_W-1:0] sw_w20, sw_w21, sw_w22;
-  wire               sw_window_valid;
+  reg [7:0] ref_buf [0:TOTAL_OUTPUT-1];
+  reg [7:0] out_buf [0:TOTAL_OUTPUT-1];
 
-  wire signed [WEIGHT_W-1:0] wr_w0, wr_w1, wr_w2;
-  wire signed [WEIGHT_W-1:0] wr_w3, wr_w4, wr_w5;
-  wire signed [WEIGHT_W-1:0] wr_w6, wr_w7, wr_w8;
-
-  wire [PIXEL_W-1:0]          sa_pixels  [SA_ROWS-1:0][SA_COLS-1:0];
-  wire signed [WEIGHT_W-1:0]  sa_weights [SA_ROWS-1:0][SA_COLS-1:0];
-  wire signed [PRODUCT_W-1:0] sa_products[SA_ROWS-1:0][SA_COLS-1:0];
-  wire                        sa_products_valid;
-
-  assign sa_pixels[0][0] = sw_w00; assign sa_pixels[0][1] = sw_w01; assign sa_pixels[0][2] = sw_w02;
-  assign sa_pixels[1][0] = sw_w10; assign sa_pixels[1][1] = sw_w11; assign sa_pixels[1][2] = sw_w12;
-  assign sa_pixels[2][0] = sw_w20; assign sa_pixels[2][1] = sw_w21; assign sa_pixels[2][2] = sw_w22;
-
-  assign sa_weights[0][0] = wr_w0; assign sa_weights[0][1] = wr_w1; assign sa_weights[0][2] = wr_w2;
-  assign sa_weights[1][0] = wr_w3; assign sa_weights[1][1] = wr_w4; assign sa_weights[1][2] = wr_w5;
-  assign sa_weights[2][0] = wr_w6; assign sa_weights[2][1] = wr_w7; assign sa_weights[2][2] = wr_w8;
-
-  wire signed [PRODUCT_W-1:0] at_p0, at_p1, at_p2;
-  wire signed [PRODUCT_W-1:0] at_p3, at_p4, at_p5;
-  wire signed [PRODUCT_W-1:0] at_p6, at_p7, at_p8;
-
-  assign at_p0 = sa_products[0][0]; assign at_p1 = sa_products[0][1]; assign at_p2 = sa_products[0][2];
-  assign at_p3 = sa_products[1][0]; assign at_p4 = sa_products[1][1]; assign at_p5 = sa_products[1][2];
-  assign at_p6 = sa_products[2][0]; assign at_p7 = sa_products[2][1]; assign at_p8 = sa_products[2][2];
-
-  wire signed [SUM_W-1:0] at_sum_out;
-  wire                     at_valid_out;
-
-  wire [PIXEL_W-1:0] norm_pixel_out;
-  wire               norm_valid_out;
-
-  wire obuf_row_ready;
-  wire obuf_buf_empty;
-
-  wire row_cnt_ge2;
-  assign row_cnt_ge2 = (pic_row_cnt >= 2);
-  assign done = (cu_state == 3'd0) && !start;
-
-  pixel_input_controller #(
-    .PIXEL_W     (PIXEL_W),
-    .IMAGE_WIDTH (IMAGE_WIDTH),
-    .IMAGE_HEIGHT(IMAGE_HEIGHT)
-  ) u_pic (
-    .clk        (clk),        .rst        (rst),
-    .pixel_in   (pixel_in),   .pixel_valid(pixel_valid),
-    .pixel_ready(pixel_ready),
-    .wr_addr    (pic_wr_addr),.wr_data    (pic_wr_data),
-    .wr_en_lb0  (pic_wr_en_lb0), .wr_en_lb1(pic_wr_en_lb1),
-    .live_pixel (pic_live_pixel), .live_valid(pic_live_valid),
-    .row_done   (pic_row_done),  .frame_done(pic_frame_done),
-    .row_cnt    (pic_row_cnt)
-  );
-
-  line_buffer #(.PIXEL_W(PIXEL_W), .IMAGE_WIDTH(IMAGE_WIDTH)) u_lb0 (
-    .clk    (clk),
-    .wr_en  (pic_wr_en_lb0), .wr_addr(pic_wr_addr), .wr_data(pic_wr_data),
-    .rd_addr(cu_lb_rd_addr), .rd_data(lb0_rd_data)
-  );
-
-  line_buffer #(.PIXEL_W(PIXEL_W), .IMAGE_WIDTH(IMAGE_WIDTH)) u_lb1 (
-    .clk    (clk),
-    .wr_en  (pic_wr_en_lb1), .wr_addr(pic_wr_addr), .wr_data(pic_wr_data),
-    .rd_addr(cu_lb_rd_addr), .rd_data(lb1_rd_data)
-  );
-
-  sliding_window #(.PIXEL_W(PIXEL_W), .IMAGE_WIDTH(IMAGE_WIDTH)) u_sw (
-    .clk        (clk),
-    .rst        (rst || cu_sw_flush),
-    .shift_en   (cu_shift_en),
-    .row0_pixel (lb0_rd_data), .row1_pixel(lb1_rd_data), .row2_pixel(pic_live_pixel),
-    .w00(sw_w00),.w01(sw_w01),.w02(sw_w02),
-    .w10(sw_w10),.w11(sw_w11),.w12(sw_w12),
-    .w20(sw_w20),.w21(sw_w21),.w22(sw_w22),
-    .window_valid(sw_window_valid)
-  );
-
-  weight_rom #(.WEIGHT_W(WEIGHT_W)) u_wrom (
-    .mode(mode),
-    .w0(wr_w0),.w1(wr_w1),.w2(wr_w2),
-    .w3(wr_w3),.w4(wr_w4),.w5(wr_w5),
-    .w6(wr_w6),.w7(wr_w7),.w8(wr_w8)
-  );
-
-  systolic_array_3x3 #(
-    .PIXEL_W  (PIXEL_W),
-    .WEIGHT_W (WEIGHT_W),
-    .PRODUCT_W(PRODUCT_W),
-    .ROWS     (SA_ROWS),
-    .COLS     (SA_COLS)
-  ) u_sa (
-    .clk           (clk), .rst(rst),
-    .load_weight   (cu_load_weight),
-    .pixel_valid   (cu_pe_pixel_valid),
-    .pixels        (sa_pixels),
-    .weights       (sa_weights),
-    .products      (sa_products),
-    .products_valid(sa_products_valid)
-  );
-
-  adder_tree #(.PRODUCT_W(PRODUCT_W), .SUM_W(SUM_W)) u_at (
-    .clk      (clk), .rst(rst),
-    .p0(at_p0),.p1(at_p1),.p2(at_p2),
-    .p3(at_p3),.p4(at_p4),.p5(at_p5),
-    .p6(at_p6),.p7(at_p7),.p8(at_p8),
-    .valid_in (sa_products_valid),
-    .sum_out  (at_sum_out),
-    .valid_out(at_valid_out)
-  );
-
-  output_normalizer #(.SUM_W(SUM_W), .PIXEL_W(PIXEL_W)) u_norm (
-    .raw_result(at_sum_out), .mode(mode),
-    .valid_in  (at_valid_out),
-    .pixel_out (norm_pixel_out),
-    .valid_out (norm_valid_out)
-  );
-
-  output_buffer #(.PIXEL_W(PIXEL_W), .OUTPUT_WIDTH(OUTPUT_SIZE)) u_obuf (
-    .clk      (clk), .rst(rst),
-    .wr_en    (norm_valid_out), .wr_data(norm_pixel_out),
-    .rd_en    (cu_out_rd_en),
-    .rd_data  (pixel_out),
-    .rd_valid (pixel_out_valid),
-    .row_ready(obuf_row_ready),
-    .buf_empty(obuf_buf_empty)
-  );
-
-  control_unit #(
+  top #(
     .IMAGE_WIDTH  (IMAGE_WIDTH),
     .IMAGE_HEIGHT (IMAGE_HEIGHT),
-    .OUTPUT_WIDTH (OUTPUT_SIZE),
-    .ADDER_LATENCY(ADDER_LATENCY)
-  ) u_cu (
-    .clk           (clk), .rst(rst),
+    .OUTPUT_SIZE  (OUTPUT_SIZE)
+  ) dut (
+    .clk           (clk),
+    .rst           (rst),
     .start         (start),
-    .window_valid  (sw_window_valid),
-    .row_done_in   (pic_row_done),
-    .frame_done_in (pic_frame_done),
-    .row_cnt_ge2   (row_cnt_ge2),
-    .buf_row_ready (obuf_row_ready),
-    .buf_empty     (obuf_buf_empty),
-    .load_weight   (cu_load_weight),
-    .shift_en      (cu_shift_en),
-    .sw_flush      (cu_sw_flush),
-    .pe_pixel_valid(cu_pe_pixel_valid),
-    .out_wr_en     (cu_out_wr_en),
-    .out_rd_en     (cu_out_rd_en),
-    .lb_rd_addr    (cu_lb_rd_addr),
-    .state_out     (cu_state)
+    .mode          (mode),
+    .pixel_in      (pixel_in),
+    .pixel_valid   (pixel_valid),
+    .pixel_ready   (pixel_ready),
+    .pixel_out     (pixel_out),
+    .pixel_out_valid(pixel_out_valid),
+    .done          (done)
   );
+
+  always #(CLK_PERIOD/2) clk = ~clk;
+
+  task reset_dut;
+    begin
+      rst         = 1'b0;
+      start       = 1'b0;
+      pixel_valid = 1'b0;
+      pixel_in    = 8'h00;
+      @(posedge clk); #1;
+      @(posedge clk); #1;
+      rst = 1'b1;
+      @(posedge clk); #1;
+    end
+  endtask
+
+  task feed_image(input [255*8:0] filename);
+    integer fd;
+    integer pixel_val;
+    integer col, row;
+    begin
+      fd = $fopen(filename, "rb");
+      if (fd == 0) begin
+        $display("ERROR: Cannot open pixel file: %s", filename);
+        $finish;
+      end
+      for (row = 0; row < IMAGE_HEIGHT; row = row + 1) begin
+        for (col = 0; col < IMAGE_WIDTH; col = col + 1) begin
+          pixel_val = $fgetc(fd);
+          if (pixel_val < 0) begin
+            $display("ERROR: Unexpected EOF at row=%0d col=%0d", row, col);
+            $fclose(fd);
+            $finish;
+          end
+          @(posedge clk);
+          while (!pixel_ready) @(posedge clk);
+          #1;
+          pixel_in    = pixel_val[7:0];
+          pixel_valid = 1'b1;
+        end
+      end
+      @(posedge clk); #1;
+      pixel_valid = 1'b0;
+      $fclose(fd);
+    end
+  endtask
+
+  task collect_output;
+    begin
+      out_pixel_count = 0;
+      while (out_pixel_count < TOTAL_OUTPUT) begin
+        @(posedge clk);
+        if (pixel_out_valid) begin
+          out_buf[out_pixel_count] = pixel_out;
+          out_pixel_count = out_pixel_count + 1;
+        end
+      end
+    end
+  endtask
+
+  task compare_reference(input [255*8:0] ref_filename);
+    integer fd;
+    integer ref_val;
+    begin
+      fd = $fopen(ref_filename, "rb");
+      if (fd == 0) begin
+        $display("WARNING: Reference file not found: %s — skipping comparison", ref_filename);
+        $fclose(fd);
+        disable compare_reference;
+      end
+      cmp_errors = 0;
+      for (i = 0; i < TOTAL_OUTPUT; i = i + 1) begin
+        ref_val = $fgetc(fd);
+        if (ref_val < 0) begin
+          $display("ERROR: Reference file shorter than expected at index %0d", i);
+          $fclose(fd);
+          disable compare_reference;
+        end
+        ref_buf[i] = ref_val[7:0];
+        if (out_buf[i] !== ref_buf[i]) begin
+          if (cmp_errors < 20)
+            $display("MISMATCH at [%0d,%0d]: RTL=%0d REF=%0d",
+                     i/OUTPUT_SIZE, i%OUTPUT_SIZE, out_buf[i], ref_buf[i]);
+          cmp_errors = cmp_errors + 1;
+        end
+      end
+      $fclose(fd);
+      if (cmp_errors == 0)
+        $display("PASS: All %0d output pixels match reference.", TOTAL_OUTPUT);
+      else
+        $display("FAIL: %0d / %0d pixels differ from reference.", cmp_errors, TOTAL_OUTPUT);
+    end
+  endtask
+
+  task dump_output(input [255*8:0] out_filename);
+    integer fd;
+    begin
+      fd = $fopen(out_filename, "wb");
+      if (fd == 0) begin
+        $display("WARNING: Cannot write output file %s", out_filename);
+        disable dump_output;
+      end
+      for (i = 0; i < TOTAL_OUTPUT; i = i + 1)
+        $fwrite(fd, "%c", out_buf[i]);
+      $fclose(fd);
+      $display("INFO: RTL output written to %s", out_filename);
+    end
+  endtask
+
+  initial begin
+    clk  = 1'b0;
+    mode = 1'b0;
+
+    $display("=== Gaussian blur test (full 258x258 image) ===");
+    reset_dut;
+
+    mode  = 1'b0;
+    start = 1'b1;
+    @(posedge clk); #1;
+    start = 1'b0;
+
+    fork
+      feed_image("input_258x258.bin");
+      collect_output;
+    join
+
+    dump_output("rtl_output_gauss.bin");
+    compare_reference("ref_output_gauss.bin");
+
+    $display("=== Sobel-X test (full 258x258 image) ===");
+    reset_dut;
+
+    mode  = 1'b1;
+    start = 1'b1;
+    @(posedge clk); #1;
+    start = 1'b0;
+
+    fork
+      feed_image("input_258x258.bin");
+      collect_output;
+    join
+
+    dump_output("rtl_output_sobel.bin");
+    compare_reference("ref_output_sobel.bin");
+
+    $display("Simulation complete.");
+    $finish;
+  end
+
+  initial begin
+    $dumpfile("tb_top.vcd");
+    $dumpvars(0, tb_top);
+  end
+
+  initial begin
+    #((TOTAL_PIXELS * 2 + 100000) * CLK_PERIOD);
+    $display("TIMEOUT: simulation exceeded maximum cycle limit.");
+    $finish;
+  end
 
 endmodule
