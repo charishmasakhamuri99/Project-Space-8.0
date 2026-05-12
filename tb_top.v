@@ -1,16 +1,15 @@
-`define IMAGE_WIDTH  10    
-`define IMAGE_HEIGHT 10    
-`define OUTPUT_SIZE  8     
-`define CLK_PERIOD   10    
-`define TOTAL_PIXELS (`IMAGE_WIDTH * `IMAGE_HEIGHT)
-`define TOTAL_OUTPUT (`OUTPUT_SIZE * `OUTPUT_SIZE)
-
-
 `timescale 1ns/1ps
 
 module tb_top;
 
-  // DUT ports
+  parameter IMAGE_WIDTH   = 258;
+  parameter IMAGE_HEIGHT  = 258;
+  parameter OUTPUT_SIZE   = 256;
+  parameter PIXEL_W       = 8;
+  parameter CLK_PERIOD    = 10;
+  parameter TOTAL_PIXELS  = IMAGE_WIDTH * IMAGE_HEIGHT;
+  parameter TOTAL_OUTPUT  = OUTPUT_SIZE * OUTPUT_SIZE;
+
   reg        clk, rst, start, mode;
   reg  [7:0] pixel_in;
   reg        pixel_valid;
@@ -19,12 +18,19 @@ module tb_top;
   wire       pixel_out_valid;
   wire       done;
 
-  // DUT instantiation
+  integer i, j;
+  integer pix_fd, out_fd, ref_fd;
+  integer cmp_errors;
+  integer out_pixel_count;
+
+  reg [7:0] ref_buf [0:TOTAL_OUTPUT-1];
+  reg [7:0] out_buf [0:TOTAL_OUTPUT-1];
+
   top #(
-    .IMAGE_WIDTH (`IMAGE_WIDTH),
-    .IMAGE_HEIGHT(`IMAGE_HEIGHT),
-    .OUTPUT_SIZE (`OUTPUT_SIZE)
-  ) dut(
+    .IMAGE_WIDTH  (IMAGE_WIDTH),
+    .IMAGE_HEIGHT (IMAGE_HEIGHT),
+    .OUTPUT_SIZE  (OUTPUT_SIZE)
+  ) dut (
     .clk           (clk),
     .rst           (rst),
     .start         (start),
@@ -37,152 +43,162 @@ module tb_top;
     .done          (done)
   );
 
-  // Clock generation
-  initial clk = 0;
-  always #(`CLK_PERIOD/2) clk = ~clk;
+  always #(CLK_PERIOD/2) clk = ~clk;
 
-  reg [7:0] test_image[`TOTAL_PIXELS-1:0];
-
-  // Output capture
-  reg [7:0] output_pixels[`TOTAL_OUTPUT-1:0];
-  integer   out_idx;
-  integer   total_out;
-
-  integer   pix_file;
-  integer   scan_ret;
-  integer   tmp_pix;
-  integer   pix_idx;
-  integer   r, c;
-
- 
-  task load_pixels_from_file;
-    integer k;
+  task reset_dut;
     begin
-      pix_file = $fopen("pixels.txt", "r");
-      if(pix_file == 0) begin
-        $display("ERROR: Could not open pixels.txt — using zero image as fallback.");
-        for(k=0; k<`TOTAL_PIXELS; k=k+1)
-          test_image[k] = 8'h00;
-      end
-      else begin
-        for(k=0; k<`TOTAL_PIXELS; k=k+1) begin
-          scan_ret = $fscanf(pix_file, "%d\n", tmp_pix);
-          if(scan_ret == 1)
-            test_image[k] = tmp_pix[7:0];
-          else begin
-            $display("WARNING: pixels.txt ended early at index %0d — padding with 0.", k);
-            test_image[k] = 8'h00;
-          end
-        end
-        $fclose(pix_file);
-        $display("INFO: Loaded %0d pixels from pixels.txt.", `TOTAL_PIXELS);
-      end
-    end
-  endtask
-
-  task feed_pixels;
-    begin
-      pix_idx = 0;
-      while(pix_idx < `TOTAL_PIXELS) begin
-        @(posedge clk);
-        if(pixel_ready) begin
-          pixel_in    = test_image[pix_idx];
-          pixel_valid = 1'b1;
-          pix_idx     = pix_idx + 1;
-        end
-        else
-          pixel_valid = 1'b0;
-      end
-      @(posedge clk);
+      rst         = 1'b0;
+      start       = 1'b0;
       pixel_valid = 1'b0;
+      pixel_in    = 8'h00;
+      @(posedge clk); #1;
+      @(posedge clk); #1;
+      rst = 1'b1;
+      @(posedge clk); #1;
     end
   endtask
 
-  
+  task feed_image(input [255*8:0] filename);
+    integer fd;
+    integer pixel_val;
+    integer col, row;
+    begin
+      fd = $fopen(filename, "rb");
+      if (fd == 0) begin
+        $display("ERROR: Cannot open pixel file: %s", filename);
+        $finish;
+      end
+      for (row = 0; row < IMAGE_HEIGHT; row = row + 1) begin
+        for (col = 0; col < IMAGE_WIDTH; col = col + 1) begin
+          pixel_val = $fgetc(fd);
+          if (pixel_val < 0) begin
+            $display("ERROR: Unexpected EOF at row=%0d col=%0d", row, col);
+            $fclose(fd);
+            $finish;
+          end
+          @(posedge clk);
+          while (!pixel_ready) @(posedge clk);
+          #1;
+          pixel_in    = pixel_val[7:0];
+          pixel_valid = 1'b1;
+        end
+      end
+      @(posedge clk); #1;
+      pixel_valid = 1'b0;
+      $fclose(fd);
+    end
+  endtask
 
-  // Main test sequence
+  task collect_output;
+    begin
+      out_pixel_count = 0;
+      while (out_pixel_count < TOTAL_OUTPUT) begin
+        @(posedge clk);
+        if (pixel_out_valid) begin
+          out_buf[out_pixel_count] = pixel_out;
+          out_pixel_count = out_pixel_count + 1;
+        end
+      end
+    end
+  endtask
+
+  task compare_reference(input [255*8:0] ref_filename);
+    integer fd;
+    integer ref_val;
+    begin
+      fd = $fopen(ref_filename, "rb");
+      if (fd == 0) begin
+        $display("WARNING: Reference file not found: %s — skipping comparison", ref_filename);
+        $fclose(fd);
+        disable compare_reference;
+      end
+      cmp_errors = 0;
+      for (i = 0; i < TOTAL_OUTPUT; i = i + 1) begin
+        ref_val = $fgetc(fd);
+        if (ref_val < 0) begin
+          $display("ERROR: Reference file shorter than expected at index %0d", i);
+          $fclose(fd);
+          disable compare_reference;
+        end
+        ref_buf[i] = ref_val[7:0];
+        if (out_buf[i] !== ref_buf[i]) begin
+          if (cmp_errors < 20)
+            $display("MISMATCH at [%0d,%0d]: RTL=%0d REF=%0d",
+                     i/OUTPUT_SIZE, i%OUTPUT_SIZE, out_buf[i], ref_buf[i]);
+          cmp_errors = cmp_errors + 1;
+        end
+      end
+      $fclose(fd);
+      if (cmp_errors == 0)
+        $display("PASS: All %0d output pixels match reference.", TOTAL_OUTPUT);
+      else
+        $display("FAIL: %0d / %0d pixels differ from reference.", cmp_errors, TOTAL_OUTPUT);
+    end
+  endtask
+
+  task dump_output(input [255*8:0] out_filename);
+    integer fd;
+    begin
+      fd = $fopen(out_filename, "wb");
+      if (fd == 0) begin
+        $display("WARNING: Cannot write output file %s", out_filename);
+        disable dump_output;
+      end
+      for (i = 0; i < TOTAL_OUTPUT; i = i + 1)
+        $fwrite(fd, "%c", out_buf[i]);
+      $fclose(fd);
+      $display("INFO: RTL output written to %s", out_filename);
+    end
+  endtask
+
   initial begin
-    rst         = 1'b0;   // active-low reset — assert (drive low) to reset
-    start       = 1'b0;
-    mode        = 1'b1;   
-    pixel_in    = 8'h00;
-    pixel_valid = 1'b0;
-    out_idx     = 0;
-    total_out   = 0;
+    clk  = 1'b0;
+    mode = 1'b0;
 
-    load_pixels_from_file;
+    $display("=== Gaussian blur test (full 258x258 image) ===");
+    reset_dut;
 
-    repeat(5) @(posedge clk);
-    rst = 1'b1;            // de-assert reset (drive high = normal operation)
-    @(posedge clk);
-
-    $display("=== SOBEL-X TEST ===");
-    $display("Image  : %0dx%0d", `IMAGE_WIDTH, `IMAGE_HEIGHT);
-    $display("Output : %0dx%0d", `OUTPUT_SIZE, `OUTPUT_SIZE);
-
-    @(posedge clk);
+    mode  = 1'b0;
     start = 1'b1;
-    @(posedge clk);
+    @(posedge clk); #1;
     start = 1'b0;
 
-    feed_pixels;
+    fork
+      feed_image("input_258x258.bin");
+      collect_output;
+    join
 
-    wait(done);
-    @(posedge clk);
-    $display("=== SOBEL-X DONE. Output pixels collected: %0d ===", total_out);
-    $display("Expected : %0d", `TOTAL_OUTPUT);
+    dump_output("rtl_output_gauss.bin");
+    compare_reference("ref_output_gauss.bin");
 
-    if(total_out == `TOTAL_OUTPUT)
-      $display("PASS: Output pixel count correct.");
-    else
-      $display("FAIL: Output pixel count mismatch.");
+    $display("=== Sobel-X test (full 258x258 image) ===");
+    reset_dut;
 
-    $display("First output row:");
-    for(c=0; c<`OUTPUT_SIZE; c=c+1)
-      $write("%0d ", output_pixels[c]);
-    $display("");
-
-    rst       = 1'b0;   
-    mode      = 1'b0;
-    out_idx   = 0;
-    total_out = 0;
-    repeat(5) @(posedge clk);
-    rst   = 1'b1;
+    mode  = 1'b1;
     start = 1'b1;
-    @(posedge clk);
+    @(posedge clk); #1;
     start = 1'b0;
 
-    $display("=== GAUSSIAN TEST ===");
+    fork
+      feed_image("input_258x258.bin");
+      collect_output;
+    join
 
-    feed_pixels;
+    dump_output("rtl_output_sobel.bin");
+    compare_reference("ref_output_sobel.bin");
 
-    wait(done);
-    @(posedge clk);
-    $display("Gaussian done. Output pixels: %0d", total_out);
-
-    $display("First output row:");
-    for(c=0; c<`OUTPUT_SIZE; c=c+1)
-      $write("%0d ", output_pixels[c]);
-    $display("");
-
-    #(`CLK_PERIOD * 10);
     $display("Simulation complete.");
     $finish;
   end
 
-  always@(posedge clk) begin
-    if(pixel_out_valid) begin
-      if(out_idx < `TOTAL_OUTPUT)
-        output_pixels[out_idx] = pixel_out;
-      out_idx   = out_idx + 1;
-      total_out = total_out + 1;
-    end
+  initial begin
+    $dumpfile("tb_top.vcd");
+    $dumpvars(0, tb_top);
   end
 
-  // Timeout watchdog
   initial begin
-    #(`CLK_PERIOD * 200000);
-    $display("TIMEOUT — simulation did not complete.");
+    #((TOTAL_PIXELS * 2 + 100000) * CLK_PERIOD);
+    $display("TIMEOUT: simulation exceeded maximum cycle limit.");
     $finish;
   end
 
